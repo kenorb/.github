@@ -30,6 +30,21 @@ on:
         description: Issue or Pull Request number to act on
         required: false
         type: number
+      version_agents:
+        default: main
+        description: Version of agents to use
+        required: false
+        type: string
+      version_instructions:
+        default: main
+        description: Version of instructions to use
+        required: false
+        type: string
+      version_skills:
+        default: main
+        description: Version of skills to use
+        required: false
+        type: string
   workflow_dispatch:
     inputs:
       agent:
@@ -97,21 +112,6 @@ on:
           - xai/grok-code-fast-1  # Agentic coding + reasoning, 256K context
         required: true
         type: choice
-      version_agents:
-        default: main
-        description: Version of agents to use
-        required: false
-        type: string
-      version_instructions:
-        default: main
-        description: Version of instructions to use
-        required: false
-        type: string
-      version_skills:
-        default: main
-        description: Version of skills to use
-        required: false
-        type: string
       prompt:
         description: Prompt for the agent
         required: true
