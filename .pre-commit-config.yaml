@@ -29,9 +29,6 @@ repos:
     rev: v2.4.1
     hooks:
       - id: codespell
-        args:
-          - -L
-          - AKS
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.24.2
     hooks:
