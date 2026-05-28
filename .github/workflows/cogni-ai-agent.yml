@@ -13,26 +13,15 @@ run-name: >-
   }}
 on:
   issue_comment:
-    types:
-      - created
-      - edited
+    types: [created, edited]
   pull_request_review_comment:
-    types:
-      - created
-      - edited
+    types: [created, edited]
   discussion:
-    types:
-      - created
-      - edited
-      - answered
+    types: [created, edited, answered]
   discussion_comment:
-    types:
-      - created
-      - edited
+    types: [created, edited]
   issues:
-    types:
-      - opened
-      - edited
+    types: [opened, edited]
   workflow_call:
     inputs:
       agent:
@@ -250,7 +239,8 @@ jobs:
   summary:
     name: Generate Summary (post-run)
     needs: cogni-ai
-    if: always() && needs.cogni-ai.result != 'skipped' && needs.cogni-ai.outputs.run == 'true'
+    if: always() && needs.cogni-ai.result != 'skipped' && needs.cogni-ai.outputs.run
+      == 'true'
     runs-on: ubuntu-latest
     permissions:
       actions: read
