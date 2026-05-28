@@ -45,7 +45,7 @@ on:
     types:
       - completed
 env:
-  ORG_REPO: Cogni-AI-OU/.github
+  ORG_REPO: kenorb/.github
 permissions:
   contents: read
 jobs:
