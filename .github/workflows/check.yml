@@ -1,0 +1,176 @@
+---
+# Note: Keep keys and envs in alphabetical order.
+name: Check
+# yamllint disable-line rule:truthy
+on:
+  pull_request:
+  push:
+  schedule:
+    - cron: 0 0 * * 1  # Run every Monday at 00:00 UTC
+  workflow_call:
+    inputs:
+      actionlint-matcher-path:
+        description: >
+          Path to actionlint problem matcher JSON file. If not specified,
+          uses the default from the organization's .github repository.
+        required: false
+        type: string
+        default: ''
+      pre-commit-matcher-path:
+        description: >
+          Path to pre-commit problem matcher JSON file. If not specified,
+          uses the default from the organization's .github repository.
+        required: false
+        type: string
+        default: ''
+      submodules:
+        default: 'false'
+        description: 'Whether to checkout submodules: true, false, or recursive'
+        required: false
+        type: string
+  workflow_dispatch:
+    inputs:
+      submodules:
+        default: 'false'
+        description: 'Whether to checkout submodules: true, false, or recursive'
+        options:
+          - 'false'
+          - 'true'
+          - recursive
+        required: false
+        type: choice
+  workflow_run:
+    workflows:
+      - Cogni AI Agent
+    types:
+      - completed
+env:
+  ORG_REPO: kenorb/.github
+permissions:
+  contents: read
+jobs:
+  actionlint:
+    name: actionlint
+    # Skip if triggered by workflow_run and the triggering workflow failed
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # For workflow_run, checkout the head branch from the triggering workflow
+          ref: ${{ github.event.workflow_run.head_branch || github.ref }}
+          submodules: ${{ inputs.submodules || 'false' }}
+      # Checkout the central repo to access default matcher files when not local and no path provided
+      - name: Checkout matcher files
+        if: github.repository != env.ORG_REPO && !inputs.actionlint-matcher-path
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.ORG_REPO }}
+          path: .github-matchers
+          sparse-checkout: |
+            .github/actionlint-matcher.json
+          sparse-checkout-cone-mode: false
+      - name: Add Problem Matcher for actionlint
+        run: |
+          MATCHER_PATH=""
+          # Precedence: 1. Input path, 2. .github/ path, 3. Fallback path
+          CANDIDATES=(
+            "${{ inputs.actionlint-matcher-path }}"
+            ".github/actionlint-matcher.json"
+            ".github-matchers/.github/actionlint-matcher.json"
+          )
+          for p in "${CANDIDATES[@]}"; do
+            if [ -n "$p" ] && [ -f "$p" ]; then
+              MATCHER_PATH="$p"
+              break
+            fi
+          done
+          if [ -n "$MATCHER_PATH" ]; then
+            echo "::add-matcher::$MATCHER_PATH"
+          else
+            echo "Warning: No actionlint problem matcher found. Searched: ${CANDIDATES[*]}"
+          fi
+        shell: bash
+      - uses: reviewdog/action-actionlint@v1
+  link-checker:
+    name: Link Checker
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_branch || github.ref }}
+          submodules: ${{ inputs.submodules || 'false' }}
+      - name: Restore lychee cache
+        uses: actions/cache@v5.0.5
+        with:
+          key: cache-lychee-${{ github.sha }}
+          path: .lycheecache
+          restore-keys: |
+            cache-lychee-
+      - name: Link Checker
+        uses: lycheeverse/lychee-action@v2.8.0
+        with:
+          args: --cache --max-cache-age 1d --verbose --no-progress './**/*.md'
+          fail: true
+  pre-commit:
+    name: Pre-commit
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_branch || github.ref }}
+          submodules: ${{ inputs.submodules || 'false' }}
+      # Checkout the central repo to access default matcher files when not local and no path provided
+      - name: Checkout matcher files
+        if: github.repository != env.ORG_REPO && !inputs.pre-commit-matcher-path
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.ORG_REPO }}
+          path: .github-matchers
+          sparse-checkout: |
+            .github/pre-commit-matcher.json
+          sparse-checkout-cone-mode: false
+      - name: Restore pre-commit cache
+        uses: actions/cache@v5.0.5
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit|${{ hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: |
+            pre-commit|
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install pre-commit
+        run: pip install pre-commit
+      - name: Add Problem Matcher for pre-commit
+        run: |
+          MATCHER_PATH=""
+          # Precedence: 1. Input path, 2. .github/ path, 3. Fallback path
+          CANDIDATES=(
+            "${{ inputs.pre-commit-matcher-path }}"
+            ".github/pre-commit-matcher.json"
+            ".github-matchers/.github/pre-commit-matcher.json"
+          )
+          for p in "${CANDIDATES[@]}"; do
+            if [ -n "$p" ] && [ -f "$p" ]; then
+              MATCHER_PATH="$p"
+              break
+            fi
+          done
+          if [ -n "$MATCHER_PATH" ]; then
+            echo "::add-matcher::$MATCHER_PATH"
+          else
+            echo "Warning: No pre-commit problem matcher found. Searched: ${CANDIDATES[*]}"
+          fi
+        shell: bash
+      - name: Run pre-commit
+        run: pre-commit run --all-files --show-diff-on-failure --color=never
