@@ -123,7 +123,7 @@ See: [Storing prompts in GitHub repositories](https://docs.github.com/en/github-
 
 ## Additional Resources
 
-- [AGENTS.md](../../AGENTS.md) - General agent guidance
+- [AGENTS.md](../AGENTS.md) - General agent guidance
 - [Copilot Instructions](../copilot-instructions.md) - Coding standards
 - [GitHub Actions Workflows](../workflows/) - Reusable workflows
-- [Instructions](../../AGENTS.md) - Language-specific guidelines (available at runtime)
+- [Instructions](../AGENTS.md) - Language-specific guidelines (available at runtime)
