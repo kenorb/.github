@@ -1,0 +1,223 @@
+---
+name: Check — PR Comment
+on:
+  workflow_run:
+    workflows:
+      - Check
+      - Development Containers (CI)
+    types:
+      - completed
+  workflow_call:
+    inputs:
+      conclusion:
+        description: The conclusion of the run (optional if triggered by workflow_run)
+        required: false
+        type: string
+      head_sha:
+        description: The head SHA of the run (optional if triggered by workflow_run)
+        required: false
+        type: string
+      run_id:
+        description: The ID of the workflow run (optional if triggered by workflow_run)
+        required: false
+        type: string
+      run_url:
+        description: The URL of the run (optional if triggered by workflow_run)
+        required: false
+        type: string
+permissions:
+  actions: read
+  checks: read
+  issues: write
+  pull-requests: write
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post PR comment with results
+        uses: actions/github-script@v9
+        env:
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+        with:
+          script: |-
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const headSha = process.env.INPUT_HEAD_SHA || context.payload.workflow_run?.head_sha;
+            if (!headSha) {
+              console.log("Missing headSha context. Exiting.");
+              return;
+            }
+            let prNumber;
+            if (context.payload.workflow_run?.pull_requests?.length > 0) {
+              prNumber = context.payload.workflow_run.pull_requests[0].number;
+            } else {
+              const { data: associatedPulls } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner,
+                repo,
+                commit_sha: headSha
+              });
+              const pr = associatedPulls.find((pull) => pull.state === "open" && pull.head.sha === headSha);
+              if (pr) {
+                prNumber = pr.number;
+              }
+            }
+            if (!prNumber) {
+              console.log(`No active PR found for commit ${headSha}. Exiting.`);
+              return;
+            }
+            const marker = '<!-- check-error-results -->';
+            const monitoredWorkflows = ['Check', 'Development Containers (CI)'];
+            console.log(`Searching for latest runs of: ${monitoredWorkflows.join(', ')} for SHA ${headSha}`);
+            const { data: allRunsResponse } = await github.rest.actions.listWorkflowRunsForRepo({
+              owner,
+              repo,
+              head_sha: headSha,
+              per_page: 100
+            });
+            const latestRuns = monitoredWorkflows.map(name =>
+              allRunsResponse.workflow_runs.find(run => run.name === name)
+            ).filter(Boolean);
+            const failedRuns = latestRuns.filter(run => run.conclusion === 'failure');
+            const inProgressRuns = latestRuns.filter(run =>
+              ['in_progress', 'queued', 'requested', 'waiting'].includes(run.status)
+            );
+            if (failedRuns.length === 0) {
+              if (inProgressRuns.length === 0) {
+                console.log('All monitored workflows succeeded or skipped. Cleaning up.');
+                try {
+                  const { data: currentLabels } = await github.rest.issues.listLabelsOnIssue({
+                    owner,
+                    repo,
+                    issue_number: prNumber
+                  });
+                  if (currentLabels.find(l => l.name === 'check-error')) {
+                    await github.rest.issues.removeLabel({
+                      owner,
+                      repo,
+                      issue_number: prNumber,
+                      name: 'check-error'
+                    });
+                  }
+                  const comments = await github.paginate(github.rest.issues.listComments, {
+                    owner,
+                    repo,
+                    issue_number: prNumber
+                  });
+                  const existing = comments.find(c => c.body.includes(marker));
+                  if (existing) {
+                    await github.rest.issues.deleteComment({ owner, repo, comment_id: existing.id });
+                  }
+                } catch (error) {
+                  console.error('Error during cleanup:', error);
+                }
+              } else {
+                console.log('Some workflows are still in progress, and no failures found yet. Skipping cleanup.');
+              }
+              return;
+            }
+            console.log(`${failedRuns.length} workflows failed. Fetching jobs and annotations.`);
+            let allAnnotations = [];
+            for (const run of failedRuns) {
+              const { data: jobsResponse } = await github.rest.actions.listJobsForWorkflowRun({
+                owner,
+                repo,
+                run_id: run.id
+              });
+              const failedJobs = jobsResponse.jobs.filter(job => job.conclusion === 'failure');
+              for (const job of failedJobs) {
+                let checkRunId = null;
+                if (job.check_run_url) {
+                  const match = job.check_run_url.match(/\/check-runs\/(\d+)$/);
+                  if (match) checkRunId = Number(match[1]);
+                }
+                let annotations = [];
+                if (checkRunId) {
+                  annotations = await github.paginate(github.rest.checks.listAnnotations, {
+                    owner,
+                    repo,
+                    check_run_id: checkRunId
+                  });
+                }
+                if (annotations.length > 0) {
+                  for (const ann of annotations) {
+                    allAnnotations.push({ ...ann, job_name: `${run.name} / ${job.name}` });
+                  }
+                } else {
+                  allAnnotations.push({
+                    job_name: `${run.name} / ${job.name}`,
+                    path: '',
+                    start_line: '',
+                    message: 'Job failed without specific annotations. Please check the logs.',
+                    annotation_level: 'failure'
+                  });
+                }
+              }
+            }
+            const findingsLines = allAnnotations.map(a => {
+              const loc = a.path ? ` at \`${a.path}:${a.start_line}\`` : '';
+              const safeMsg = (a.message || '')
+                .replace(/\\/g, '\\\\')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/\n/g, '<br>');
+              return `- **${a.job_name}**${loc}: ${safeMsg}`;
+            });
+            const body = [
+              marker,
+              '## ⛔ Workflow Failures Detected',
+              '',
+              'The following job errors and annotations were found:',
+              '',
+              findingsLines.join('\n'),
+              '',
+              '### 🛠️ Run Links',
+              ...failedRuns.map(run => `- [${run.name}](${run.html_url})`)
+            ];
+            const bodyText = body.join('\n');
+            try {
+              await github.rest.issues.createLabel({
+                owner,
+                repo,
+                name: 'check-error',
+                color: 'B60205',
+                description: 'Workflow reported errors'
+              });
+            } catch (error) {
+              if (error.status !== 422) console.error('Error creating label:', error);
+            }
+            const { data: currentLabels } = await github.rest.issues.listLabelsOnIssue({
+              owner,
+              repo,
+              issue_number: prNumber
+            });
+            if (!currentLabels.find(l => l.name === 'check-error')) {
+              await github.rest.issues.addLabels({
+                owner,
+                repo,
+                issue_number: prNumber,
+                labels: ['check-error']
+              });
+            }
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number: prNumber
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body: bodyText
+              });
+              console.log(`Updated existing comment ${existing.id}`);
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: prNumber,
+                body: bodyText
+              });
+              console.log(`Created new comment on PR  #${prNumber}`);
+            }
