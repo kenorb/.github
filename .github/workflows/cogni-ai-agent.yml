@@ -4,13 +4,35 @@
 # - <https://opencode.ai/docs>
 name: Cogni AI Agent
 # yamllint disable-line rule:truthy
+run-name: >-
+  Agent on  #${{
+    github.event.issue.number
+    || github.event.pull_request.number
+    || github.event.discussion.number
+    || github.run_id
+  }}
 on:
   issue_comment:
     types:
       - created
+      - edited
   pull_request_review_comment:
     types:
       - created
+      - edited
+  discussion:
+    types:
+      - created
+      - edited
+      - answered
+  discussion_comment:
+    types:
+      - created
+      - edited
+  issues:
+    types:
+      - opened
+      - edited
   workflow_call:
     inputs:
       agent:
@@ -19,30 +41,28 @@ on:
         required: false
         type: string
       model:
-        description: Model to use
+        default: ${{ vars.OPENCODE_MODEL_DEFAULT || 'opencode/gemini-3-flash' }}
+        description: Model to use for OpenCode
         required: false
         type: string
       prompt:
-        description: Prompt for the agent
-        required: true
-        type: string
-      issue_number:
-        description: Issue or Pull Request number to act on
+        default: ''
+        description: Custom prompt to override the default prompt
         required: false
-        type: number
+        type: string
       version_agents:
         default: main
-        description: Version of agents to use
+        description: Version of cogni-ai-agents to use.
         required: false
         type: string
       version_instructions:
         default: main
-        description: Version of instructions to use
+        description: Version of cogni-ai-agent-instructions to use.
         required: false
         type: string
       version_skills:
         default: main
-        description: Version of skills to use
+        description: Version of cogni-ai-agent-skills to use.
         required: false
         type: string
   workflow_dispatch:
@@ -73,6 +93,7 @@ on:
           - opencode/claude-sonnet-4
           - opencode/claude-sonnet-4-5
           - opencode/claude-sonnet-4-6
+          - opencode/deepseek-v4-flash-free
           - opencode/gemini-3.1-pro
           - opencode/gemini-3-flash
           - opencode/glm-4.6
@@ -110,110 +131,139 @@ on:
           - xai/grok-4.20-0309-non-reasoning  # Flagship, 2M context
           - xai/grok-4.20-0309-reasoning  # Flagship + reasoning, 2M context
           - xai/grok-code-fast-1  # Agentic coding + reasoning, 256K context
-        required: true
+        required: false
         type: choice
       prompt:
-        description: Prompt for the agent
-        required: true
-        type: string
+        description: Custom prompt to override the default prompt
+        required: false
+        default: ''
+env:
+  GITHUB_REF_RESOLVED: >-
+    ${{
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        format('refs/pull/{0}/head', github.event.issue.number)
+      ) ||
+      (
+        github.event_name == 'pull_request_review_comment' &&
+        format('refs/pull/{0}/head', github.event.pull_request.number)
+      ) ||
+      github.ref
+    }}
+  OPENCODE_AGENT_DEFAULT: cogni-ai-architect
+  OPENCODE_MODEL_DEFAULT: opencode/gemini-3-flash
 jobs:
-  cogni-ai-agent:
-    name: Run Cogni AI agent
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'workflow_call' ||
-      ((github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment') &&
-        github.event.sender.type != 'Bot' &&
-        (github.event.comment.author_association == 'COLLABORATOR' ||
-         github.event.comment.author_association == 'MEMBER' ||
-         github.event.comment.author_association == 'OWNER') &&
-        contains(github.event.comment.body, '/co'))
+  cogni-ai:
+    name: Cogni AI Agent
+    outputs:
+      run: ${{ steps.cogni-ai.outputs.run }}
+    # Note: These are pre-run conditions, actual trigger conditions are defined within the action it-self.
+    if: |
+      (
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'workflow_call' ||
+        github.event.sender.type != 'Bot'
+      ) &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'workflow_call' ||
+        contains(
+          github.event.comment.body ||
+          github.event.issue.body ||
+          github.event.pull_request.body ||
+          github.event.discussion.body ||
+          '',
+          '/'
+        ) ||
+        contains(
+          github.event.comment.body ||
+          github.event.issue.body ||
+          github.event.pull_request.body ||
+          github.event.discussion.body ||
+          '',
+          '@'
+        )
+      )
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: write
-      id-token: write
+      discussions: read
+      id-token: write  # Needed so opencode can request an OIDC token for GitHub API calls
       issues: write
+      models: read
+      packages: read
       pull-requests: write
     steps:
+      # See: <https://github.com/actions/checkout>
       - uses: actions/checkout@v6
         with:
-          persist-credentials: false  # Prevents Duplicate header: "Authorization" error.
-      - uses: actions/setup-python@v6.1.0
+          persist-credentials: false  # Prevents duplicate Authorization header
+          ref: ${{ env.GITHUB_REF_RESOLVED }}
+      - uses: actions/cache@v5.0.5
         with:
+          path: ~/.cache/pre-commit
+          key: pre-commit|${{ hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: |
+            pre-commit|
+      - uses: actions/setup-python@v6.2.0
+        with:
+          cache: >-
+            ${{ hashFiles('.devcontainer/requirements.txt', 'requirements.txt',
+            '**/pyproject.toml') != '' && 'pip' || '' }}
+          cache-dependency-path: |
+            .devcontainer/requirements.txt
+            requirements.txt
+            **/pyproject.toml
           python-version: '3.12'
-      - name: Restore Python user site
-        id: python-user-site
-        uses: actions/cache@v5.0.1
-        with:
-          path: ~/.local
-          key: ${{ runner.os }}-pip-${{ hashFiles('.devcontainer/requirements.txt') }}
-      - name: Install Python dependencies
-        if: steps.python-user-site.outputs.cache-hit != 'true'
-        run: python -m pip install --user -r .devcontainer/requirements.txt
-      - name: Ensure local bin on PATH
-        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      # See: <https://github.com/Cogni-AI-OU/cogni-ai-agent-action>
+      - name: Install pre-commit
+        run: pip install pre-commit
+      - name: Install dependencies
+        run: |
+          if [ -f .devcontainer/requirements.txt ]; then
+            pip install -r .devcontainer/requirements.txt
+          elif [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
       - name: Run Cogni AI Agent
+        id: cogni-ai
         uses: Cogni-AI-OU/cogni-ai-agent-action@main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          agent: ${{ inputs.agent || 'cogni-ai-architect' }}
-          model: ${{ inputs.model || vars.OPENCODE_MODEL_DEFAULT || 'opencode/gemini-3-flash' }}
-          opencode-api-key: ${{ secrets.OPENCODE_API_KEY }}  # <https://opencode.ai/auth>
-          issue-number: ${{ inputs.issue_number || github.event.issue.number || github.event.pull_request.number }}
+          agent: >-
+            ${{ inputs.agent || '' }}
+          model: ${{ inputs.model || env.OPENCODE_MODEL_DEFAULT }}
+          opencode-api-key: ${{ secrets.OPENCODE_API_KEY }}
+          prompt: >-
+            ${{
+              inputs.prompt ||
+              github.event.comment.body ||
+              github.event.issue.body ||
+              github.event.pull_request.body ||
+              github.event.discussion.body
+            }}
           version_agents: ${{ inputs.version_agents || 'main' }}
           version_instructions: ${{ inputs.version_instructions || 'main' }}
           version_skills: ${{ inputs.version_skills || 'main' }}
-          permissions: |-
-            bash:
-              '*': deny
-              ansible*: allow
-              ansible-galaxy*: allow
-              ansible-playbook*: allow
-              awk*: allow
-              continue*: allow
-              cp*: allow
-              docker*: allow
-              ex*: allow
-              gh*: allow
-              gh pr review*: allow
-              git*: allow
-              hexdump*: allow
-              jq*: allow
-              links*: allow
-              mawk*: allow
-              molecule*: allow
-              pipx*: allow
-              pre-commit*: allow
-              printf*: allow
-              sed*: allow
-              set*: allow
-              time*: allow
-              timeout*: allow
-              touch*: allow
-              true*: allow
-              vim*: allow
-          prompt: >-
-            ${{ (inputs.issue_number && format('Address issue #{0}: {1}', inputs.issue_number, inputs.prompt)) ||
-            github.event.comment.body ||
-            github.event.discussion.body ||
-            github.event.issue.body ||
-            github.event.pull_request.body ||
-            inputs.prompt }}
   summary:
     name: Generate Summary (post-run)
-    needs: cogni-ai-agent
-    if: always() && needs.cogni-ai-agent.result != 'skipped'
+    needs: cogni-ai
+    if: always() && needs.cogni-ai.result != 'skipped' && needs.cogni-ai.outputs.run == 'true'
     runs-on: ubuntu-latest
     permissions:
       actions: read
       contents: read
       id-token: write
+      models: read
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+          ref: ${{ env.GITHUB_REF_RESOLVED }}
       - name: Generate Summary
         uses: Cogni-AI-OU/cogni-ai-agent-action/ai-inference/summary@main
         with:
-          agent_job_id: cogni-ai-agent
+          agent_job_id: cogni-ai
           github_token: ${{ secrets.GITHUB_TOKEN }}
