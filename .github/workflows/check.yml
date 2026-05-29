@@ -115,7 +115,14 @@ jobs:
       - name: Link Checker
         uses: lycheeverse/lychee-action@v2.8.0
         with:
-          args: --cache --max-cache-age 1d --verbose --no-progress './**/*.md'
+          args: >-
+            --cache --max-cache-age 1d --verbose --no-progress
+            './**/*.html'
+            './**/*.md'
+            './**/*.rst'
+            './**/*.txt'
+            './**/*.yml'
+            './**/*.yaml'
           fail: true
   pre-commit:
     name: Pre-commit
