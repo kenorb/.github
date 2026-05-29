@@ -121,7 +121,8 @@ jobs:
             './**/*.md'
             './**/*.rst'
             './**/*.txt'
-            './**/*.y?ml'
+            './**/*.yml'
+            './**/*.yaml'
           fail: true
   pre-commit:
     name: Pre-commit
